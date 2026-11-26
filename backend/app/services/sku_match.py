@@ -8,6 +8,14 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+from app.merge_support import (
+    confirmed_target,
+    find_goods,
+    goods_specs,
+    normalize_spec,
+    resolve_attribution,
+    to_code,
+)
 from app.services.base import BaseModuleService
 from app.store import store
 
@@ -134,6 +142,178 @@ class SkuMatchService(BaseModuleService):
             "goods": goods_name,
             "has_baseline": has_baseline,
         }
+
+    # ------------------------------------------------------------------
+    # 归并后的确认归属 + 基线重读 + 旧档案追溯
+    # ------------------------------------------------------------------
+
+    def spec_check(self, code_or_id: Any, spec: str | None = None) -> dict[str, Any]:
+        """按商品档案核对规格与基线。
+
+        - 先从归并数据解析当前确认归属（被并档案 -> 保留档案）；
+        - 用当前归属重读每个匹配使用的价格基线，同时沿旧标识 / 归属链兜底；
+        - 保留原商品档案、原商品标识等“之前所属档案”的查询依据。
+        """
+        queried = to_code(code_or_id) or str(code_or_id or "")
+        attribution = resolve_attribution(queried)
+        current = attribution["current_code"]
+        all_codes = {queried, current, *attribution["former_codes"]}
+
+        goods = find_goods(current) or find_goods(queried)
+        specs = goods_specs(current)
+        for old in attribution["former_codes"]:
+            for s in goods_specs(old):
+                if s not in specs:
+                    specs.append(s)
+
+        matches = [
+            m for m in store.rows(self.MODULE)
+            if m.get("商品档案") in all_codes
+            or m.get("原商品档案") in all_codes
+        ]
+        baselines = [
+            b for b in store.rows("price_baseline")
+            if b.get("商品标识") in all_codes
+            or b.get("原商品标识") in all_codes
+        ]
+
+        wanted_norm = normalize_spec(spec) if spec else ""
+
+        def baseline_spec_norm(b: dict[str, Any]) -> str:
+            return normalize_spec(b.get("归一规格"))
+
+        effective = [b for b in baselines if b.get("status") == "已生效"]
+        chosen: dict[str, Any] | None = None
+        if wanted_norm:
+            chosen = next(
+                (b for b in effective if baseline_spec_norm(b) == wanted_norm), None,
+            )
+        if chosen is None:
+            # 优先取与某条匹配候选规格一致的生效基线
+            match_norms = {
+                normalize_spec(m.get("候选规格")) for m in matches
+                if normalize_spec(m.get("候选规格"))
+            }
+            chosen = next(
+                (b for b in effective if baseline_spec_norm(b) in match_norms), None,
+            )
+        if chosen is None and effective:
+            chosen = effective[0]
+
+        baseline_views = []
+        for b in baselines:
+            baseline_views.append({
+                "id": b.get("id"),
+                "goods_code": b.get("商品标识"),
+                "商品标识": b.get("商品标识"),
+                "spec": b.get("归一规格"),
+                "归一规格": b.get("归一规格"),
+                "price": b.get("基线价格"),
+                "基线价格": b.get("基线价格"),
+                "status": b.get("status"),
+                "former_goods_code": b.get("原商品标识", ""),
+                "原商品标识": b.get("原商品标识", ""),
+                "采样窗口": b.get("采样窗口", ""),
+            })
+
+        match_views = []
+        for m in matches:
+            # 每个匹配按“当前归属 + 原商品档案”重读它使用的规格基线
+            match_codes = {
+                str(m.get("商品档案", "")), str(m.get("原商品档案", "")),
+                current, *attribution["former_codes"],
+            }
+            candidate_norm = normalize_spec(m.get("候选规格"))
+            own_baselines = [
+                b for b in effective
+                if b.get("商品标识") in match_codes
+                or b.get("原商品标识") in match_codes
+            ]
+            own = next(
+                (b for b in own_baselines
+                 if normalize_spec(b.get("归一规格")) == candidate_norm),
+                own_baselines[0] if own_baselines else None,
+            )
+            match_views.append({
+                "id": m.get("id"),
+                "batch": m.get("匹配批次"),
+                "匹配批次": m.get("匹配批次"),
+                "goods_code": m.get("商品档案"),
+                "商品档案": m.get("商品档案"),
+                "former_goods_code": m.get("原商品档案", ""),
+                "原商品档案": m.get("原商品档案", ""),
+                "candidate_spec": m.get("候选规格"),
+                "候选规格": m.get("候选规格"),
+                "confidence": m.get("匹配置信度"),
+                "status": m.get("status"),
+                "匹配状态": m.get("匹配状态"),
+                "baseline_price": own.get("基线价格") if own else None,
+                "baseline": own,
+            })
+
+        return {
+            "ok": goods is not None or bool(matches or baselines),
+            "message": (
+                f"当前归属 {current}"
+                + (f"（由 {queried} 归并）" if queried != current else "")
+                + f"：规格 {('、'.join(specs) or '未登记')}，"
+                + (f"基线价格 {chosen.get('基线价格')}" if chosen else "暂无生效基线")
+            ),
+            "queried_code": queried,
+            "goods_code": current,
+            "current_code": current,
+            "商品档案": current,
+            "former_codes": attribution["former_codes"],
+            "chain": attribution["chain"],
+            "goods": goods,
+            "specs": specs,
+            "baselines": baseline_views,
+            "matches": match_views,
+            "baseline": chosen,
+            "baseline_price": chosen.get("基线价格") if chosen else None,
+            "has_baseline": chosen is not None,
+        }
+
+    def check_entry_baseline(self, entry_id: int) -> dict[str, Any]:
+        """从一条匹配记录出发，按其（可能已更新的）商品档案重读基线。"""
+        entry = store.find(self.MODULE, entry_id)
+        if entry is None:
+            return {"ok": False, "message": f"{self.ENTITY} {entry_id} 不存在"}
+        code = entry.get("商品档案", "")
+        result = self.spec_check(code, entry.get("候选规格"))
+        result["entry"] = entry
+        result["entry_id"] = entry_id
+        return result
+
+    def list_entries(self, **kwargs: Any):
+        items, total = super().list_entries(**kwargs)
+        enriched: list[dict[str, Any]] = []
+        for row in items:
+            view = dict(row)
+            try:
+                check = self.spec_check(row.get("商品档案", ""), row.get("候选规格"))
+                view["baseline_price"] = check.get("baseline_price")
+                view["has_baseline"] = check.get("has_baseline")
+                view["current_goods_code"] = check.get("current_code")
+                view["former_goods_codes"] = check.get("former_codes")
+            except Exception:
+                # 列表增强字段不能影响主列表可用性
+                pass
+            enriched.append(view)
+        return enriched, total
+
+    def run_action(
+        self,
+        entry_id: int,
+        action: str,
+        payload: Any | None = None,
+    ) -> dict[str, Any] | tuple[dict[str, Any] | None, str]:
+        if action in {
+            "核对基线", "基线核对", "重读基线", "检查基线", "规格基线核对",
+            "核对规格基线", "check_baseline", "spec_check",
+        }:
+            return self.check_entry_baseline(entry_id)
+        return super().run_action(entry_id, action, payload)
 
     def batch_summary(self, batch: str) -> dict[str, Any]:
         """汇总匹配批次内各状态数量并上报指标。"""

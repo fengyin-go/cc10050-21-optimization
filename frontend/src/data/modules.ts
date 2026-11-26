@@ -230,6 +230,31 @@ export const MODULE_BY_KEY: Map<string, ModuleMeta> = new Map(
 
 export function moduleMeta(key: string): ModuleMeta {
   const meta = MODULE_BY_KEY.get(key)
-  if (!meta) throw new Error(`没有登记名为 ${key} 的业务模块`)
-  return meta
+  if (meta) return meta
+  // 后端存在“分组处理单”等资源视图但未进左侧导航时，给出安全兜底，
+  // 避免直接访问 /merge_order 这类地址时整页崩溃。
+  if (key.startsWith('merge') || key.includes('order') || key.includes('ticket') || key.includes('batch')) {
+    return {
+      key,
+      name: '归并分组处理单',
+      entity: '分组处理单',
+      desc: '商品档案批量归并的原单与失败恢复记录，可在商品登记中心勾选档案建组',
+      fields: ['单号', 'status', 'operator'],
+      statuses: ['待处理', '部分办结', '等候处理', '已办结'],
+      actions: ['继续处理'],
+      actionTargets: { 继续处理: '部分办结' },
+      metrics: ['处理单总数', '已办结', '等候处理'],
+    }
+  }
+  return {
+    key,
+    name: key,
+    entity: '业务记录',
+    desc: '未在前端登记元数据的资源视图',
+    fields: [],
+    statuses: ['待处理', '已办结'],
+    actions: [],
+    actionTargets: {},
+    metrics: ['记录总数', '已办结', '待处理'],
+  }
 }

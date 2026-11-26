@@ -53,13 +53,22 @@ class BaseModuleService:
         rows = store.rows(self.MODULE)
         entry = {"id": max((int(row.get("id", 0)) for row in rows), default=0) + 1}
         entry.update({field: values.get(field) for field in self.LIST_FIELDS})
+        # 保留模块扩展字段（例如商品档案的“包装规格”），避免领域信息在登记时被丢弃
+        for key, value in values.items():
+            if key not in entry and value is not None:
+                entry[key] = value
         entry["status"] = self.STATUS_ORDER[0]
         entry["pending"] = True
         entry["abnormal"] = False
         rows.append(entry)
         return entry, []
 
-    def run_action(self, entry_id: int, action: str) -> tuple[dict[str, Any] | None, str]:
+    def run_action(
+        self,
+        entry_id: int,
+        action: str,
+        payload: Any | None = None,
+    ) -> tuple[dict[str, Any] | None, str]:
         entry = store.find(self.MODULE, entry_id)
         if entry is None:
             return None, f"{self.ENTITY} {entry_id} 不存在或已归档"

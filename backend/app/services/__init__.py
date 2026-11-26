@@ -22,6 +22,7 @@ from app.services.price_export import PriceExportService
 from app.services.change_history import ChangeHistoryService
 from app.services.match_review import MatchReviewService
 from app.services.collect_metrics import CollectMetricsService
+from app.services.merge_order import MergeOrderService
 
 SERVICES: dict[str, BaseModuleService] = {
     "shop_site": ShopSiteService(),
@@ -45,6 +46,19 @@ SERVICES: dict[str, BaseModuleService] = {
     "match_review": MatchReviewService(),
     "collect_metrics": CollectMetricsService(),
 }
+
+# 分组处理单是归并批次的资源视图，用同一个服务实例挂多个直观资源名，
+# 方便按“处理单 / 批次单”等不同叫法查询与对接。
+_merge_order_service = MergeOrderService()
+for _alias in (
+    "merge_order", "merge_orders", "merge-order", "merge-orders",
+    "goods_merge_order", "goods_merge_orders",
+    "goods-merge-order", "goods-merge-orders",
+    "merge_ticket", "merge_tickets", "merge-ticket", "merge-tickets",
+    "merge_batch", "merge_batches", "merge-batch", "merge-batches",
+    "goods_merge_batch", "goods-merge-batch",
+):
+    SERVICES[_alias] = _merge_order_service
 
 
 def service_for(module: str) -> BaseModuleService | None:

@@ -79,5 +79,41 @@ npm run dev
 - 列表接口统一返回 `{ items, total, page, size }`，动作接口统一返回 `{ ok, message }`。
 - 状态流转只允许在 `app/services` 里改，路由层不做业务判断。
 
+## 商品归并：批量分组 + 失败恢复
+
+商品登记中心把“逐对合并”扩成了一批合并组：
+
+1. 在商品列表勾选档案（`data-testid="pick-<商品标识>"`，如 `pick-G42`），
+   「将勾选档案建为合并组」；同一档案（如 G42）允许被勾进两个组。
+2. 每组用单选指定保留档案（`keep-<组序号>-<标识>`），「批量提交归并」
+   （`submit-batch-merge`）生成**分组处理单**（`HB-0001`…）。
+3. 处理单标出 `重复入组 / 归属冲突`（`conflict-G42`、`group-reason-<组key>`）
+   与待办组；冲突组一律等候，绝不会把同一档案同时归到两个保留档案。
+4. 品牌不一致或包装规格不一致的组同样列为等候，不能仅因搜索名称相同强制合并。
+5. 「继续原批提交」（`continue-order`）只办结合格 / 待办组；已办结组跳过，
+   已确认归属受 `merge_lineage` 台账保护，重复提交 / 恢复都不会改挂。
+   冲突可在单内裁决（`adjudicate-<组key>`）后再继续。
+6. 原单可经处理单列表（`open-order-<id>`）或 `/goods_registry?order=<id>` 重新进入。
+
+主要接口（同一能力保留多个直观别名）：
+
+```text
+POST /api/goods_registry/merge/orders          # 批量建单（groups/merges/pairs）
+GET  /api/goods_registry/merge/orders[/<ref>]  # 原单列表 / 详情（id 或 HB-xxxx）
+POST /api/goods_registry/merge/orders/<ref>/continue|resume|retry
+POST /api/goods_registry/merge/orders/<ref>/adjudicate
+GET  /api/goods_registry/lineage?batch_no=HB-0001
+GET  /api/merge_order[/<id>]                   # 处理单的通用资源视图
+POST /api/merge_order/<id>/actions {"action":"继续处理"}
+POST /api/goods_registry/<id>/merge {"keep_code":"G41"}
+GET  /api/sku_match/spec-check/<code>?spec=750ml   # 确认归属 + 基线重读
+GET  /api/sku_match/<matchId>/baseline
+```
+
+规格匹配器在归并后把匹配记录的 `商品档案` 改挂到保留档案，并保留
+`原商品档案` / `归属轨迹`；价格基线仍按原商品标识留存，核对时沿归属链
+（`former_codes`）重读，因此 G42 的 750ml 基线 86、G52 的 500ml 基线 32
+在新归属（如 G51）下依然可查到。
+
 领域：数据工程
 子方向：数据采集、爬虫与RPA

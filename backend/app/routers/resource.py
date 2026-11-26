@@ -91,8 +91,15 @@ def create_entry(module: str, payload: EntryPayload) -> ActionResult:
     return ActionResult(ok=True, message=f"{service.ENTITY}已登记", entry=entry)
 
 
-@router.post("/{module}/{entry_id}/actions", response_model=ActionResult)
-def run_action(module: str, entry_id: int, payload: ActionPayload) -> ActionResult:
+@router.post("/{module}/{entry_id}/actions")
+def run_action(module: str, entry_id: int, payload: ActionPayload) -> dict[str, Any]:
     service = require_service(module)
-    entry, message = service.run_action(entry_id, payload.action.strip())
-    return ActionResult(ok=entry is not None, message=message, entry=entry)
+    outcome = service.run_action(entry_id, payload.action.strip(), payload)
+    # 领域服务可以直接返回富结果（归并处理单、基线核对等），保留全部字段
+    if isinstance(outcome, dict):
+        outcome.setdefault("ok", True)
+        outcome.setdefault("message", "")
+        outcome.setdefault("entry", None)
+        return outcome
+    entry, message = outcome
+    return {"ok": entry is not None, "message": message, "entry": entry}
